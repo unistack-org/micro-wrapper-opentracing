@@ -10,12 +10,12 @@ import (
 	rbroker "github.com/unistack-org/micro-broker-memory"
 	cli "github.com/unistack-org/micro-client-grpc"
 	rmemory "github.com/unistack-org/micro-registry-memory"
+	rrouter "github.com/unistack-org/micro-router-registry"
 	srv "github.com/unistack-org/micro-server-grpc"
+	pberr "github.com/unistack-org/micro-server-grpc/errors"
 	"github.com/unistack-org/micro/v3/broker"
 	"github.com/unistack-org/micro/v3/client"
-	microerr "github.com/unistack-org/micro/v3/errors"
 	"github.com/unistack-org/micro/v3/router"
-	rrouter "github.com/unistack-org/micro/v3/router/registry"
 	"github.com/unistack-org/micro/v3/server"
 )
 
@@ -34,7 +34,7 @@ type testHandler struct{}
 
 func (t *testHandler) Method(ctx context.Context, req *TestRequest, rsp *TestResponse) error {
 	if req.IsError {
-		return microerr.BadRequest("bad", "test error")
+		return pberr.BadRequest("bad", "test error")
 	}
 
 	rsp.Message = "passed"
@@ -67,30 +67,21 @@ func TestClient(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tracer := mocktracer.New()
 
-			reg, err := rmemory.NewRegistry()
-			if err != nil {
-				t.Fatal(err)
-			}
-			brk, err := rbroker.NewBroker(broker.Registry(reg))
-			if err != nil {
-				t.Fatal(err)
-			}
+			reg := rmemory.NewRegistry()
+			brk := rbroker.NewBroker(broker.Registry(reg))
 
 			serverName := "micro.server.name"
 			serverID := "id-1234567890"
 			serverVersion := "1.0.0"
 
-			rt, err := rrouter.NewRouter(router.Registry(reg))
-			if err != nil {
-				t.Fatal(err)
-			}
+			rt := rrouter.NewRouter(router.Registry(reg))
 
 			c := cli.NewClient(
 				client.Router(rt),
 				client.WrapCall(NewCallWrapper(tracer)),
 			)
 
-			s, err := srv.NewServer(
+			s := srv.NewServer(
 				server.Name(serverName),
 				server.Version(serverVersion),
 				server.Id(serverID),
@@ -99,10 +90,9 @@ func TestClient(t *testing.T) {
 				server.WrapSubscriber(NewSubscriberWrapper(tracer)),
 				server.WrapHandler(NewHandlerWrapper(tracer)),
 			)
-			if err != nil {
+			if err := s.Init(); err != nil {
 				t.Fatal(err)
 			}
-
 			defer s.Stop()
 
 			type Test struct {
