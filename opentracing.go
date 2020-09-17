@@ -18,6 +18,11 @@ type otWrapper struct {
 	client.Client
 }
 
+var (
+	SpanTagsFromContext func(context.Context) map[string]interface{}
+	SpanLogsFromContext func(context.Context) []opentracinglog.Field
+)
+
 // StartSpanFromContext returns a new span with the given operation name and options. If a span
 // is found in the context, it will be used as the parent of the resulting span.
 func StartSpanFromContext(ctx context.Context, tracer opentracing.Tracer, name string, opts ...opentracing.StartSpanOption) (context.Context, opentracing.Span, error) {
@@ -50,6 +55,17 @@ func StartSpanFromContext(ctx context.Context, tracer opentracing.Tracer, name s
 
 	ctx = opentracing.ContextWithSpan(ctx, sp)
 	ctx = metadata.NewContext(ctx, md)
+
+	if SpanTagsFromContext != nil {
+		for k, v := range SpanTagsFromContext(ctx) {
+			sp.SetTag(k, v)
+		}
+	}
+
+	if SpanLogsFromContext != nil {
+		sp.LogFields(SpanLogsFromContext(ctx)...)
+	}
+
 	return ctx, sp, nil
 }
 
@@ -62,8 +78,10 @@ func (o *otWrapper) Call(ctx context.Context, req client.Request, rsp interface{
 	defer span.Finish()
 	if err = o.Client.Call(ctx, req, rsp, opts...); err != nil {
 		span.LogFields(opentracinglog.String("error", err.Error()))
+		span.LogFields(opentracinglog.Error(err))
 		span.SetTag("error", true)
 	}
+
 	return err
 }
 
@@ -77,6 +95,7 @@ func (o *otWrapper) Stream(ctx context.Context, req client.Request, opts ...clie
 	stream, err := o.Client.Stream(ctx, req, opts...)
 	if err != nil {
 		span.LogFields(opentracinglog.String("error", err.Error()))
+		span.LogFields(opentracinglog.Error(err))
 		span.SetTag("error", true)
 	}
 	return stream, err
@@ -91,6 +110,7 @@ func (o *otWrapper) Publish(ctx context.Context, p client.Message, opts ...clien
 	defer span.Finish()
 	if err = o.Client.Publish(ctx, p, opts...); err != nil {
 		span.LogFields(opentracinglog.String("error", err.Error()))
+		span.LogFields(opentracinglog.Error(err))
 		span.SetTag("error", true)
 	}
 	return err
@@ -121,6 +141,7 @@ func NewCallWrapper(ot opentracing.Tracer) client.CallWrapper {
 			defer span.Finish()
 			if err = cf(ctx, addr, req, rsp, opts); err != nil {
 				span.LogFields(opentracinglog.String("error", err.Error()))
+				span.LogFields(opentracinglog.Error(err))
 				span.SetTag("error", true)
 			}
 			return err
@@ -143,6 +164,7 @@ func NewHandlerWrapper(ot opentracing.Tracer) server.HandlerWrapper {
 			defer span.Finish()
 			if err = h(ctx, req, rsp); err != nil {
 				span.LogFields(opentracinglog.String("error", err.Error()))
+				span.LogFields(opentracinglog.Error(err))
 				span.SetTag("error", true)
 			}
 			return err
@@ -165,6 +187,7 @@ func NewSubscriberWrapper(ot opentracing.Tracer) server.SubscriberWrapper {
 			defer span.Finish()
 			if err = next(ctx, msg); err != nil {
 				span.LogFields(opentracinglog.String("error", err.Error()))
+				span.LogFields(opentracinglog.Error(err))
 				span.SetTag("error", true)
 			}
 			return err
