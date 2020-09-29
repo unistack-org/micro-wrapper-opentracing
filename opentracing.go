@@ -271,7 +271,7 @@ func NewClientWrapper(opts ...Option) client.Wrapper {
 		for _, o := range opts {
 			o(&options)
 		}
-		return &otWrapper{opts: options}
+		return &otWrapper{opts: options, Client: c}
 	}
 }
 
