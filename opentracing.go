@@ -14,14 +14,143 @@ import (
 )
 
 type otWrapper struct {
-	ot opentracing.Tracer
+	opts             Options
+	serverHandler    server.HandlerFunc
+	serverSubscriber server.SubscriberFunc
+	clientCallFunc   client.CallFunc
 	client.Client
 }
 
-var (
-	SpanTagsFromContext func(context.Context) map[string]interface{}
-	SpanLogsFromContext func(context.Context) []opentracinglog.Field
-)
+func (ot *otWrapper) Options() Options {
+	return opts
+}
+
+type ClientCallObserver func(context.Context, client.Request, interface{}, []client.CallOption, opentracing.Span, error)
+type ClientStreamObserver func(context.Context, client.Request, []client.CallOption, client.Stream, opentracing.Span, error)
+type ClientPublishObserver func(context.Context, client.Message, []client.PublishOption, opentracing.Span, error)
+type ClientCallFuncObserver func(context.Context, string, client.Request, interface{}, client.CallOptions, opentracing.Span, error)
+type ServerHandlerObserver func(context.Context, server.Request, interface{}, opentracing.Span, error)
+type ServerSubscriberObserver func(context.Context, server.Message, opentracing.Span, error)
+
+type Options struct {
+	Tracer                    opentracing.Tracer
+	ClientCallObservers       []ClientCallObserver
+	ClientStreamObservers     []ClientStreamObserver
+	ClientPublishObservers    []ClientPublishObserver
+	ClientCallFuncObservers   []ClientCallFuncObserver
+	ServerHandlerObservers    []ServerHandlerObserver
+	ServerSubscriberObservers []ServerSubscriberObserver
+}
+
+type Option func(*Options)
+
+func NewOptions(opts ...Option) Options {
+	options := Options{
+		Tracer:                    opentracing.GlobalTracer(),
+		ClientCallObservers:       []ClientCallObserver{DefaultClientCallObserver},
+		ClientStreamObservers:     []ClientStreamObserver{DefaultClientStreamObserver},
+		ClientPublishObservers:    []ClientPublishObserver{DefaultClientPublishObserver},
+		ClientCallFuncObservers:   []ClientCallFuncObserver{DefaultClientCallFuncObserver},
+		ServerHandlerObservers:    []ServerHandlerObserver{DefaultServerHandlerObserver},
+		ServerSubscriberObservers: []ServerSubscriberObserver{DefaultServerSubscriberObserver},
+	}
+
+	for _, o := range opts {
+		o(&options)
+	}
+
+	return options
+}
+
+func WithTracer(ot opentracing.Tracer) Option {
+	return func(o *Options) {
+		o.Tracer = ot
+	}
+}
+
+func WithClientCallObservers(ob ...ClientCallObserver) Option {
+	return func(o *Options) {
+		o.ClientCallObservers = ob
+	}
+}
+
+func WithClientStreamObservers(ob ...ClientStreamObserver) Option {
+	return func(o *Options) {
+		o.ClientStreamObservers = ob
+	}
+}
+
+func WithClientPublishObservers(ob ...ClientPublishObserver) Option {
+	return func(o *Options) {
+		o.ClientPublishObservers = ob
+	}
+}
+
+func WithClientCallFuncObservers(ob ...ClientCallFuncObserver) Option {
+	return func(o *Options) {
+		o.ClientCallFuncObservers = ob
+	}
+}
+
+func WithServerHandlerObservers(ob ...ServerHandlerObserver) Option {
+	return func(o *Options) {
+		o.ServerHandlerObservers = ob
+	}
+}
+
+func WithServerSubscriberObservers(ob ...ServerSubscriberObserver) Option {
+	return func(o *Options) {
+		o.ServerSubscriberObservers = ob
+	}
+}
+
+func DefaultClientCallObserver(ctx context.Context, req client.Request, rsp interface{}, opts []client.CallOption, sp opentracing.Span, err error) {
+	sp.SetOperationName(fmt.Sprintf("%s.%s", req.Service(), req.Endpoint()))
+	if err != nil {
+		sp.LogFields(opentracinglog.Error(err))
+		sp.SetTag("error", true)
+	}
+}
+
+func DefaultClientStreamObserver(ctx context.Context, req client.Request, opts []client.CallOption, stream client.Stream, sp opentracing.Span, err error) {
+	sp.SetOperationName(fmt.Sprintf("%s.%s", req.Service(), req.Endpoint()))
+	if err != nil {
+		sp.LogFields(opentracinglog.Error(err))
+		sp.SetTag("error", true)
+	}
+}
+
+func DefaultClientPublishObserver(ctx context.Context, msg client.Message, opts []client.PublishOption, sp opentracing.Span, err error) {
+	sp.SetOperationName(fmt.Sprintf("Pub to %s", msg.Topic()))
+	if err != nil {
+		sp.LogFields(opentracinglog.Error(err))
+		sp.SetTag("error", true)
+	}
+}
+
+func DefaultServerHandlerObserver(ctx context.Context, req server.Request, rsp interface{}, sp opentracing.Span, err error) {
+	sp.SetOperationName(fmt.Sprintf("%s.%s", req.Service(), req.Endpoint()))
+	if err != nil {
+		sp.LogFields(opentracinglog.Error(err))
+		sp.SetTag("error", true)
+	}
+}
+
+func DefaultServerSubscriberObserver(ctx context.Context, msg server.Message, sp opentracing.Span, err error) {
+	sp.SetOperationName(fmt.Sprintf("Sub from %s", msg.Topic()))
+	if err != nil {
+		sp.LogFields(opentracinglog.Error(err))
+		sp.SetTag("error", true)
+	}
+}
+
+func DefaultClientCallFuncObserver(ctx context.Context, addr string, req client.Request, rsp interface{}, opts client.CallOptions, sp opentracing.Span, err error) {
+	sp.SetOperationName(fmt.Sprintf("%s.%s", req.Service(), req.Endpoint()))
+	if err != nil {
+		sp.LogFields(opentracinglog.Error(err))
+		sp.SetTag("error", true)
+	}
+}
 
 // StartSpanFromContext returns a new span with the given operation name and options. If a span
 // is found in the context, it will be used as the parent of the resulting span.
@@ -33,7 +162,7 @@ func StartSpanFromContext(ctx context.Context, tracer opentracing.Tracer, name s
 
 	// Find parent span.
 	// First try to get span within current service boundary.
-	// If there doesn't exist, try to get it from go-micro metadata(which is cross boundary)
+	// If there doesn't exist, try to get it from metadata(which is cross boundary)
 	if parentSpan := opentracing.SpanFromContext(ctx); parentSpan != nil {
 		opts = append(opts, opentracing.ChildOf(parentSpan.Context()))
 	} else if spanCtx, err := tracer.Extract(opentracing.TextMap, opentracing.TextMapCarrier(md)); err == nil {
@@ -56,141 +185,151 @@ func StartSpanFromContext(ctx context.Context, tracer opentracing.Tracer, name s
 	ctx = opentracing.ContextWithSpan(ctx, sp)
 	ctx = metadata.NewContext(ctx, md)
 
-	if SpanTagsFromContext != nil {
-		for k, v := range SpanTagsFromContext(ctx) {
-			sp.SetTag(k, v)
-		}
-	}
-
-	if SpanLogsFromContext != nil {
-		sp.LogFields(SpanLogsFromContext(ctx)...)
-	}
-
 	return ctx, sp, nil
 }
 
-func (o *otWrapper) Call(ctx context.Context, req client.Request, rsp interface{}, opts ...client.CallOption) error {
-	name := fmt.Sprintf("%s.%s", req.Service(), req.Endpoint())
-	ctx, span, err := StartSpanFromContext(ctx, o.ot, name)
+func (ot *otWrapper) Call(ctx context.Context, req client.Request, rsp interface{}, opts ...client.CallOption) error {
+	ctx, sp, err := StartSpanFromContext(ctx, ot.opts.Tracer, "")
 	if err != nil {
 		return err
 	}
-	defer span.Finish()
-	if err = o.Client.Call(ctx, req, rsp, opts...); err != nil {
-		span.LogFields(opentracinglog.String("error", err.Error()))
-		span.LogFields(opentracinglog.Error(err))
-		span.SetTag("error", true)
+	defer sp.Finish()
+
+	err = ot.Client.Call(ctx, req, rsp, opts...)
+
+	for _, o := range ot.opts.ClientCallObservers {
+		o(ctx, req, rsp, opts, sp, err)
 	}
 
 	return err
 }
 
-func (o *otWrapper) Stream(ctx context.Context, req client.Request, opts ...client.CallOption) (client.Stream, error) {
-	name := fmt.Sprintf("%s.%s", req.Service(), req.Endpoint())
-	ctx, span, err := StartSpanFromContext(ctx, o.ot, name)
+func (ot *otWrapper) Stream(ctx context.Context, req client.Request, opts ...client.CallOption) (client.Stream, error) {
+	ctx, sp, err := StartSpanFromContext(ctx, ot.opts.Tracer, "")
 	if err != nil {
 		return nil, err
 	}
-	defer span.Finish()
-	stream, err := o.Client.Stream(ctx, req, opts...)
-	if err != nil {
-		span.LogFields(opentracinglog.String("error", err.Error()))
-		span.LogFields(opentracinglog.Error(err))
-		span.SetTag("error", true)
+	defer sp.Finish()
+
+	stream, err := ot.Client.Stream(ctx, req, opts...)
+
+	for _, o := range ot.opts.ClientStreamObservers {
+		o(ctx, req, opts, stream, sp, err)
 	}
+
 	return stream, err
 }
 
-func (o *otWrapper) Publish(ctx context.Context, p client.Message, opts ...client.PublishOption) error {
-	name := fmt.Sprintf("Pub to %s", p.Topic())
-	ctx, span, err := StartSpanFromContext(ctx, o.ot, name)
+func (ot *otWrapper) Publish(ctx context.Context, msg client.Message, opts ...client.PublishOption) error {
+	ctx, sp, err := StartSpanFromContext(ctx, ot.opts.Tracer, "")
 	if err != nil {
 		return err
 	}
-	defer span.Finish()
-	if err = o.Client.Publish(ctx, p, opts...); err != nil {
-		span.LogFields(opentracinglog.String("error", err.Error()))
-		span.LogFields(opentracinglog.Error(err))
-		span.SetTag("error", true)
+	defer sp.Finish()
+
+	err = ot.Client.Publish(ctx, msg, opts...)
+
+	for _, o := range ot.opts.ClientPublishObservers {
+		o(ctx, msg, opts, sp, err)
 	}
+
+	return err
+}
+
+func (ot *otWrapper) ServerHandler(ctx context.Context, req server.Request, rsp interface{}) error {
+	ctx, sp, err := StartSpanFromContext(ctx, ot.opts.Tracer, "")
+	if err != nil {
+		return err
+	}
+	defer sp.Finish()
+
+	err = ot.serverHandler(ctx, req, rsp)
+
+	for _, o := range ot.opts.ServerHandlerObservers {
+		o(ctx, req, rsp, sp, err)
+	}
+
+	return err
+}
+
+func (ot *otWrapper) ServerSubscriber(ctx context.Context, msg server.Message) error {
+	ctx, sp, err := StartSpanFromContext(ctx, ot.opts.Tracer, "")
+	if err != nil {
+		return err
+	}
+	defer sp.Finish()
+
+	err = ot.serverSubscriber(ctx, msg)
+
+	for _, o := range ot.opts.ServerSubscriberObservers {
+		o(ctx, msg, sp, err)
+	}
+
 	return err
 }
 
 // NewClientWrapper accepts an open tracing Trace and returns a Client Wrapper
-func NewClientWrapper(ot opentracing.Tracer) client.Wrapper {
+func NewClientWrapper(opts ...Option) client.Wrapper {
 	return func(c client.Client) client.Client {
-		if ot == nil {
-			ot = opentracing.GlobalTracer()
+		options := NewOptions()
+		for _, o := range opts {
+			o(&options)
 		}
-		return &otWrapper{ot, c}
+		return &otWrapper{opts: options}
 	}
 }
 
-// NewCallWrapper accepts an opentracing Tracer and returns a Call Wrapper
-func NewCallWrapper(ot opentracing.Tracer) client.CallWrapper {
-	return func(cf client.CallFunc) client.CallFunc {
-		return func(ctx context.Context, addr string, req client.Request, rsp interface{}, opts client.CallOptions) error {
-			if ot == nil {
-				ot = opentracing.GlobalTracer()
-			}
-			name := fmt.Sprintf("%s.%s", req.Service(), req.Endpoint())
-			ctx, span, err := StartSpanFromContext(ctx, ot, name)
-			if err != nil {
-				return err
-			}
-			defer span.Finish()
-			if err = cf(ctx, addr, req, rsp, opts); err != nil {
-				span.LogFields(opentracinglog.String("error", err.Error()))
-				span.LogFields(opentracinglog.Error(err))
-				span.SetTag("error", true)
-			}
-			return err
+// NewClientCallWrapper accepts an opentracing Tracer and returns a Call Wrapper
+func NewClientCallWrapper(opts ...Option) client.CallWrapper {
+	return func(h client.CallFunc) client.CallFunc {
+		options := NewOptions()
+		for _, o := range opts {
+			o(&options)
 		}
+
+		ot := &otWrapper{opts: options, clientCallFunc: h}
+		return ot.ClientCallFunc
 	}
 }
 
-// NewHandlerWrapper accepts an opentracing Tracer and returns a Handler Wrapper
-func NewHandlerWrapper(ot opentracing.Tracer) server.HandlerWrapper {
+func (ot *otWrapper) ClientCallFunc(ctx context.Context, addr string, req client.Request, rsp interface{}, opts client.CallOptions) error {
+	ctx, sp, err := StartSpanFromContext(ctx, ot.opts.Tracer, "")
+	if err != nil {
+		return err
+	}
+	defer sp.Finish()
+
+	err = ot.clientCallFunc(ctx, addr, req, rsp, opts)
+
+	for _, o := range ot.opts.ClientCallFuncObservers {
+		o(ctx, addr, req, rsp, opts, sp, err)
+	}
+
+	return err
+}
+
+// NewServerHandlerWrapper accepts an options and returns a Handler Wrapper
+func NewServerHandlerWrapper(opts ...Option) server.HandlerWrapper {
 	return func(h server.HandlerFunc) server.HandlerFunc {
-		return func(ctx context.Context, req server.Request, rsp interface{}) error {
-			if ot == nil {
-				ot = opentracing.GlobalTracer()
-			}
-			name := fmt.Sprintf("%s.%s", req.Service(), req.Endpoint())
-			ctx, span, err := StartSpanFromContext(ctx, ot, name)
-			if err != nil {
-				return err
-			}
-			defer span.Finish()
-			if err = h(ctx, req, rsp); err != nil {
-				span.LogFields(opentracinglog.String("error", err.Error()))
-				span.LogFields(opentracinglog.Error(err))
-				span.SetTag("error", true)
-			}
-			return err
+		options := NewOptions()
+		for _, o := range opts {
+			o(&options)
 		}
+
+		ot := &otWrapper{opts: options, serverHandler: h}
+		return ot.ServerHandler
 	}
 }
 
-// NewSubscriberWrapper accepts an opentracing Tracer and returns a Subscriber Wrapper
-func NewSubscriberWrapper(ot opentracing.Tracer) server.SubscriberWrapper {
-	return func(next server.SubscriberFunc) server.SubscriberFunc {
-		return func(ctx context.Context, msg server.Message) error {
-			name := "Sub from " + msg.Topic()
-			if ot == nil {
-				ot = opentracing.GlobalTracer()
-			}
-			ctx, span, err := StartSpanFromContext(ctx, ot, name)
-			if err != nil {
-				return err
-			}
-			defer span.Finish()
-			if err = next(ctx, msg); err != nil {
-				span.LogFields(opentracinglog.String("error", err.Error()))
-				span.LogFields(opentracinglog.Error(err))
-				span.SetTag("error", true)
-			}
-			return err
+// NewServerSubscriberWrapper accepts an opentracing Tracer and returns a Subscriber Wrapper
+func NewServerSubscriberWrapper(opts ...Option) server.SubscriberWrapper {
+	return func(h server.SubscriberFunc) server.SubscriberFunc {
+		options := NewOptions()
+		for _, o := range opts {
+			o(&options)
 		}
+
+		ot := &otWrapper{opts: options, serverSubscriber: h}
+		return ot.ServerSubscriber
 	}
 }
