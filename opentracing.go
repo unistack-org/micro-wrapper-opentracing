@@ -21,10 +21,6 @@ type otWrapper struct {
 	client.Client
 }
 
-func (ot *otWrapper) Options() Options {
-	return opts
-}
-
 type ClientCallObserver func(context.Context, client.Request, interface{}, []client.CallOption, opentracing.Span, error)
 type ClientStreamObserver func(context.Context, client.Request, []client.CallOption, client.Stream, opentracing.Span, error)
 type ClientPublishObserver func(context.Context, client.Message, []client.PublishOption, opentracing.Span, error)
